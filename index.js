@@ -3,21 +3,69 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const OpenAI = require("openai");
-const Stripe = require('stripe');
+// const mongoose = require('mongoose');
 
 dotenv.config();
 
 const app = express();
 
-// OpenAI setup
+// ======================
+// MongoDB (Vercel safe)
+// ======================
+// let cached = global.mongoose;
+
+// if (!cached) {
+//   cached = global.mongoose = { conn: null, promise: null };
+// }
+
+// async function connectDB() {
+//   if (cached.conn) return cached.conn;
+
+//   if (!cached.promise) {
+//     cached.promise = mongoose.connect(process.env.MONGO_URI).then((mongoose) => {
+//       return mongoose;
+//     });
+//   }
+
+//   cached.conn = await cached.promise;
+//   return cached.conn;
+// }
+
+// connectDB();
+
+// ======================
+// Schema
+// ======================
+// const strategySchema = new mongoose.Schema({
+//   platforms: [String],
+//   goal: String,
+//   budget: String,
+//   duration: String,
+//   genre: String,
+//   listeners: String,
+//   email: String,
+//   strategy: {
+//     overview: String,
+//     bullets: [String]
+//   },
+//   createdAt: {
+//     type: Date,
+//     default: Date.now
+//   }
+// });
+
+// const Strategy = mongoose.model("Strategy", strategySchema);
+
+// ======================
+// OpenAI
+// ======================
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Stripe setup
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2026-04-22.dahlia' });
-
+// ======================
 // Middleware
+// ======================
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -26,49 +74,9 @@ app.use(cors({
 
 app.use(express.json());
 
-
-// Stripe Checkout Route
-app.post('/api/checkout', async (req, res) => {
-  try {
-    const { planId, planName, price } = req.body;
-
-    if (!planId || !planName || !price) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: `${planName} - Music Promotion Campaign`,
-              description: `Upgrade to ${planName} tier`,
-            },
-            unit_amount: price * 100,
-          },
-          quantity: 1,
-        },
-      ],
-      mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL}/?success`,
-      cancel_url: `${process.env.FRONTEND_URL}/pricing?cancele`,
-      customer_email: req.body.email || undefined,
-    });
-
-    return res.json({ sessionId: session.id });
-
-  } catch (error) {
-    console.error('Stripe error:', error);
-    return res.status(500).json({
-      error: 'Checkout failed',
-      details: error.message,
-    });
-  }
-});
-
-// Mail transporter
+// ======================
+// Email Transporter
+// ======================
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -77,25 +85,19 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-
-// 🔥 Generate strategy (CLEAN + SHORT OUTPUT)
+// ======================
+// AI Strategy Generator
+// ======================
 async function generateStrategy(data) {
   const prompt = `
-You are a senior music marketing strategist working for a premium agency.
+You are a senior music marketing strategist.
 
-Create a SHORT, CLIENT-READY marketing strategy.
+Create a SHORT marketing strategy.
 
 Rules:
-- No mention of AI or generation
-- Very concise and actionable
-- Max 12–15 lines total per section
-- Use bullet points only when necessary
-- No long paragraphs
-
-Format exactly:
-
-Strategy Overview:
-explain in short paragraph max 4 to 5 lines also mention our maketing company might media can help in this strategy
+- No AI mention
+- Max 12–15 lines
+- Very concise
 
 INPUT:
 Platforms: ${data.platforms.join(", ")}
@@ -105,11 +107,9 @@ Duration: ${data.duration}
 Genre: ${data.genre}
 Listeners: ${data.listeners}
 
-output format
-Return response in STRICT JSON format:
-
+Return STRICT JSON:
 {
-  "overview": "string (short paragraph)",
+  "overview": "short paragraph",
   "bullets": ["point 1", "point 2", "point 3"]
 }
 `;
@@ -117,43 +117,30 @@ Return response in STRICT JSON format:
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
-      {
-        role: "system",
-        content: "You are a senior music marketing strategist."
-      },
+      { role: "system", content: "You are a music marketing strategist." },
       { role: "user", content: prompt }
     ],
     temperature: 0.7,
   });
 
-  // return response.choices[0].message.content;
-  const parsed = JSON.parse(response.choices[0].message.content);
-  return parsed
+  let parsed;
+
+  try {
+    parsed = JSON.parse(response.choices[0].message.content);
+  } catch (err) {
+    console.log("JSON parse failed, fallback used");
+    parsed = {
+      overview: response.choices[0].message.content,
+      bullets: []
+    };
+  }
+
+  return parsed;
 }
 
-
-// 🔥 Format for mobile-friendly email
-function formatStrategy(text) {
-  return text
-    .split("\n")
-    .map(line => {
-      if (!line.trim()) return "";
-      return `
-        <p style="
-          margin:6px 0;
-          line-height:1.5;
-          font-size:14px;
-          color:#eaeaea;
-        ">
-          ${line}
-        </p>
-      `;
-    })
-    .join("");
-}
-
-
-// 📩 Route
+// ======================
+// ROUTE
+// ======================
 app.post('/api/post/email/sendMailToBrandBlitz', async (req, res) => {
   try {
     const { platforms, goal, budget, duration, genre, listeners, email } = req.body;
@@ -163,7 +150,7 @@ app.post('/api/post/email/sendMailToBrandBlitz', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // 🔥 Generate strategy
+    // Generate AI strategy
     const strategy = await generateStrategy({
       platforms,
       goal,
@@ -173,64 +160,35 @@ app.post('/api/post/email/sendMailToBrandBlitz', async (req, res) => {
       listeners,
     });
 
+    // Email content
     const mailOptions = {
       from: process.env.NODE_MAILER_USER,
-      to: 'zainyshorts@gmail.com',
-      subject: `New Promo Form Submission - ${platforms.join(', ')}`,
+      to: email,
+      subject: `Music Promo Strategy - ${platforms.join(', ')}`,
       html: `
-        <div style="
-          font-family: Arial;
-          background:#0f0f23;
-          color:#fff;
-          padding:20px;
-        ">
-          <div style="
-            max-width:600px;
-            margin:auto;
-            border:1px solid #ff6b35;
-            border-radius:12px;
-            padding:20px;
-            background:#1a1a2e;
-          ">
+        <div style="font-family:Arial;background:#0f0f23;color:#fff;padding:20px">
+          <div style="max-width:600px;margin:auto;background:#1a1a2e;padding:20px;border-radius:10px">
 
-            <h2 style="
-              color:#ff6b35;
-              text-align:center;
-              font-size:18px;
-              margin-bottom:15px;
-            ">
-              🎵 Music Promo Strategy Report
+            <h2 style="color:#ff6b35;text-align:center">
+              🎵 Music Strategy Report
             </h2>
 
-            <div style="font-size:13px; margin-bottom:15px;">
-              <p><b>Platforms:</b> ${platforms.join(', ')}</p>
-              <p><b>Goal:</b> ${goal}</p>
-              <p><b>Budget:</b> ${budget}</p>
-              <p><b>Duration:</b> ${duration}</p>
-              <p><b>Genre:</b> ${genre}</p>
-              <p><b>Listeners:</b> ${listeners}</p>
-              <p><b>Email:</b> ${email}</p>
-            </div>
+            <p><b>Platforms:</b> ${platforms.join(', ')}</p>
+            <p><b>Goal:</b> ${goal}</p>
+            <p><b>Budget:</b> ${budget}</p>
+            <p><b>Duration:</b> ${duration}</p>
+            <p><b>Genre:</b> ${genre}</p>
+            <p><b>Listeners:</b> ${listeners}</p>
+            <p><b>Email:</b> ${email}</p>
 
-            <hr style="border-color:#333; margin:15px 0;" />
+            <hr style="margin:15px 0;border-color:#333" />
 
-            <div>
-              <h3>Strategy Overview</h3>
-              <p>${strategy.overview}</p>
+            <h3>Strategy Overview</h3>
+            <p>${strategy.overview}</p>
 
-              <ul>
-                ${strategy.bullets.map(b => `<li>${b}</li>`).join("")}
-              </ul>
-                          </div>
-
-            <p style="
-              font-size:11px;
-              color:#777;
-              margin-top:20px;
-              text-align:center;
-            ">
-              Generated on ${new Date().toLocaleString()}
-            </p>
+            <ul>
+              ${strategy.bullets.map(b => `<li>${b}</li>`).join("")}
+            </ul>
 
           </div>
         </div>
@@ -239,22 +197,35 @@ app.post('/api/post/email/sendMailToBrandBlitz', async (req, res) => {
 
     await transporter.sendMail(mailOptions);
 
+    // Save to DB
+    // const db_res = await Strategy.create({
+    //   platforms,
+    //   goal,
+    //   budget,
+    //   duration,
+    //   genre,
+    //   listeners,
+    //   email,
+    //   strategy
+    // });
+
     return res.json({
       success: true,
-      message: 'Email sent successfully with AI strategy',
+      message: "Email sent successfully",
+      id: db_res._id
     });
 
   } catch (error) {
-    console.error('Email error:', error);
+    console.error("Server Error:", error);
     return res.status(500).json({
-      error: 'Failed to send email',
-      details: error.message,
+      error: "Internal Server Error",
+      details: error.message
     });
   }
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// ======================
+// EXPORT (VERY IMPORTANT FOR VERCEL)
+// ======================
+module.exports = app;
+// ml 
